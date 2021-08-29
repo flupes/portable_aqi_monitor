@@ -1,5 +1,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <Adafruit_PM25AQI.h>
+// #include <Adafruit_GFX.h>
+#include <Adafruit_SH110X.h>
 #include <Arduino.h>
 #include <RTCZero.h>
 
@@ -10,9 +12,14 @@
 
 Adafruit_NeoPixel gNeoStar(1, NEO_PIXEL_M0_EXPRESS_LINE);
 Adafruit_PM25AQI gAqiSensor = Adafruit_PM25AQI();
+Adafruit_SH1107 gDisplay = Adafruit_SH1107(64, 128, &Wire);
+#define BUTTON_A 9
+#define BUTTON_B 6
+#define BUTTON_C 5
+
 RTCZero gOnboardRtc;
 
-const size_t kSamplesLength = 20;
+const size_t kSamplesLength = 6;
 uint16_t gPm25Env[kSamplesLength] = {};
 
 uint32_t gAqiColors[kAqiLevelsCount] = {0x0000FF00, 0x00FFFF00, 0x00FF8800,
@@ -23,9 +30,16 @@ void setup() {
 
   gOnboardRtc.begin();
 
+  pinMode(BUTTON_A, INPUT_PULLUP);
+  pinMode(BUTTON_B, INPUT_PULLUP);
+  pinMode(BUTTON_C, INPUT_PULLUP);
+  gDisplay.begin();
+  gDisplay.display();
+  gDisplay.setRotation(1);
+
   // Wait for serial monitor to open
   Serial.begin(115200);
-  uint8_t count = 9;
+  uint8_t count = 6;
   while (count > 0 && !Serial) {
     count--;
     digitalWrite(LED_BUILTIN, HIGH);
@@ -61,6 +75,10 @@ void loop() {
   static size_t index = 0;
   static bool filled = false;
 
+  static uint16_t pm25EnvMean = 0;
+  static int16_t aqiValueMean = -1;
+  static AqiLevel aqiLevelMean = AqiLevel::OutOfRange;
+
   uint32_t start = millis();
   digitalWrite(13, LED_BUILTIN);  // turn the LED on (HIGH is the voltage level)
 
@@ -79,6 +97,40 @@ void loop() {
         filled = true;
       }
       last_crc = data.checksum;
+
+      uint16_t mae = 0;
+      float nmae = 0.0f;
+      uint16_t pm25EnvMean = mean_error(kSamplesLength, gPm25Env, mae, nmae);
+      int16_t aqiValue(0);
+      AqiLevel aqiLevel;
+      pm25_to_aqi(static_cast<float>(pm25EnvMean), aqiValue, aqiLevel);
+
+      // Display
+      char buffer[32];
+      gDisplay.clearDisplay();
+      gDisplay.setTextSize(1);
+      gDisplay.setTextColor(SH110X_WHITE);
+      gDisplay.setCursor(0, 0);
+      sprintf(buffer, "pm: 1=%d 2.5=%d 10=%d", data.pm10_env, data.pm25_env, data.pm100_env);
+      gDisplay.println(buffer);
+      sprintf(buffer, "#: %d 2.5=%d %d",
+              data.particles_03um + data.particles_05um + data.particles_10um, data.particles_25um,
+              data.particles_50um + data.particles_100um);
+      gDisplay.println(buffer);
+      gDisplay.setTextSize(2);
+      size_t level;
+      if (aqiLevelMean == AqiLevel::OutOfRange) {
+        level = static_cast<int>(aqiLevel);
+      } else {
+        level = static_cast<int>(aqiLevelMean);
+      }
+      sprintf(buffer, "AQI:%d|%d", aqiValue, aqiValueMean);
+      gDisplay.setCursor(0, 24);
+      gDisplay.println(buffer);
+      sprintf(buffer, "%s", AqiNames[level]);
+      gDisplay.setCursor(0, 46);
+      gDisplay.println(buffer);
+      gDisplay.display();
     }
   }
 
@@ -89,17 +141,15 @@ void loop() {
     if (now - last_ms > 6000) {
       uint16_t mae = 0;
       float nmae = 0.0f;
-      uint16_t pm25EnvMean = mean_error(kSamplesLength, gPm25Env, mae, nmae);
-      int16_t aqiValue(0);
-      AqiLevel aqiLevel;
-      pm25_to_aqi(static_cast<float>(pm25EnvMean), aqiValue, aqiLevel);
+      pm25EnvMean = mean_error(kSamplesLength, gPm25Env, mae, nmae);
+      pm25_to_aqi(static_cast<float>(pm25EnvMean), aqiValueMean, aqiLevelMean);
       Serial.print("PM 2.5 (Env): mean = ");
       Serial.print(pm25EnvMean);
       Serial.print(" / MAE = ");
       Serial.print(mae);
       Serial.print(" ==> aqi = ");
-      Serial.println(aqiValue);
-      gNeoStar.setPixelColor(0, gAqiColors[static_cast<int>(aqiLevel)]);
+      Serial.println(aqiValueMean);
+      gNeoStar.setPixelColor(0, gAqiColors[static_cast<int>(aqiLevelMean)]);
       gNeoStar.show();
       last_ms = now;
     }
