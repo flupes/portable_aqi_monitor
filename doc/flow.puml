@@ -1,0 +1,56 @@
+@startuml AQI Monitor Control Flow
+start
+partition Initialization {
+:board;
+:sensor;
+:display;
+:set elapsed=0;
+}
+partition "Main Loop" {
+  partition "Read Sensor" {
+    :counter = MAX_RETRY;
+    repeat
+      if (data available?) then (yes)
+        :read serial;
+        :process data;
+        break;
+      else (no)
+        :decrement counter;
+        :wait for 100ms;
+      endif
+    repeat while (counter>0?) is (yes) not (no)
+  }
+  if (counter>0) then (yes)
+
+    partition "Process" {
+      if (crc is new?) then (yes)
+        :store sample;
+      else (no)
+      endif
+      if (no interactions for a DISPLAY time?) then (yes)
+        :put display to sleep;
+      else (no)
+        :update current display page;
+      endif
+    }
+
+  else (no)
+    :increment read errors;
+    if (read errors > limit?) then (yes) 
+      :reset sensor;
+    else (no)
+    endif
+  endif
+
+  if (no interactions for STANDBY time?) then (yes)
+    :suspend sensor;
+    :enable button interrupt;
+    :but board to sleep;
+  else (no)
+    :wait for 100ms;
+  endif
+
+}
+
+stop
+@enduml
