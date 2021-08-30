@@ -4,7 +4,7 @@ partition Initialization {
 :board;
 :sensor;
 :display;
-:set elapsed=0;
+:timer0=0, timer1=0;
 }
 partition "Main Loop" {
   partition "Read Sensor" {
@@ -22,15 +22,33 @@ partition "Main Loop" {
   }
   if (counter>0) then (yes)
 
-    partition "Process" {
+    partition Process {
       if (crc is new?) then (yes)
-        :store sample;
+        :cache sample;
+        if (now-timer0 > 5s?) then (yes)
+          :average 5s cached samples;
+          :timer0 = 0;
+          if (now-timer1 > 1min?) then (yes)
+            :average 1min cached samples;
+            :store 1min average to flash;
+            :timer1=0;
+          else (no)
+          endif
+        else (no)
+        endif
+        if (no interactions for a DISPLAY time?) then (yes)
+          :put display to sleep;
+        else (no)
+          partition Display {
+            if (display text) then (yes)
+              :display latest;
+            elseif (display graph) then (yes)
+              :graph from flash;
+            else (no mode)
+            endif
+          }
+        endif
       else (no)
-      endif
-      if (no interactions for a DISPLAY time?) then (yes)
-        :put display to sleep;
-      else (no)
-        :update current display page;
       endif
     }
 
@@ -45,7 +63,11 @@ partition "Main Loop" {
   if (no interactions for STANDBY time?) then (yes)
     :suspend sensor;
     :enable button interrupt;
-    :but board to sleep;
+    :put board to sleep;
+    (Z)
+    detach;
+    (Z)
+    :wakeup sensor;
   else (no)
     :wait for 100ms;
   endif

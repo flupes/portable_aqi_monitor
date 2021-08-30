@@ -9,11 +9,11 @@
  * Absolute Error (MAE) and the Normalized Mean Absolute Error. (NMAE)*/
 template <class T>
 T mean_error(size_t size, const T data[], T &mae, float &nmae) {
-  T sum = 0;
+  uint32_t sum = 0;
   for (size_t i = 0; i < size; i++) {
     sum += data[i];
   }
-  T mean = sum / static_cast<T>(size);
+  T mean = static_cast<T>(sum / size);
   float error = 0.0;
   for (size_t i = 0; i < size; i++) {
     error += fabs(data[i] - mean);

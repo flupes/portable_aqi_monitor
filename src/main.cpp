@@ -1,6 +1,5 @@
 #include <Adafruit_NeoPixel.h>
 #include <Adafruit_PM25AQI.h>
-// #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
 #include <Arduino.h>
 #include <RTCZero.h>
@@ -19,11 +18,20 @@ Adafruit_SH1107 gDisplay = Adafruit_SH1107(64, 128, &Wire);
 
 RTCZero gOnboardRtc;
 
-const size_t kSamplesLength = 6;
-uint16_t gPm25Env[kSamplesLength] = {};
-
 uint32_t gAqiColors[kAqiLevelsCount] = {0x0000FF00, 0x00FFFF00, 0x00FF8800,
                                         0x00FF0000, 0x00FF00FF, 0x00880000};
+
+// In "active" mode, the PMS5003 outputs data every 2.3s when changes are slow, and
+// anywhere from 200ms to 800ms when changes are more rapid (at least from the specs!)
+
+// Witch a real time update every 5s, we should guaranty to have at least 2 samples,
+// at the very max 25.
+
+// The SAMD21 has plenty of RAM (32K), so at the highest sampling frequency (5Hz), 1 minute (60s)
+// would be 300 samples, hence 600 bytes than we can afford
+
+const size_t kNumberOfCachedSamples = 5 * 60 + 20;
+uint16_t gPm25CachedSamples[kNumberOfCachedSamples] = {};
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
@@ -70,101 +78,103 @@ void setup() {
 }
 
 void loop() {
-  static uint32_t last_ms = millis();
+  static uint32_t timer5 = 0;
+  static uint32_t timer60 = 0;
+  static size_t index5 = 0;
+  static size_t index60 = 0;
+
   static uint16_t last_crc = 0;
-  static size_t index = 0;
-  static bool filled = false;
 
-  static uint16_t pm25EnvMean = 0;
-  static int16_t aqiValueMean = -1;
-  static AqiLevel aqiLevelMean = AqiLevel::OutOfRange;
+  static uint16_t pm25EnvMean5s = 0;
+  static uint16_t pm25EnvMean60s = 0;
+  static int16_t aqiValueMean5s = -1;
+  static int16_t aqiValueMean60s = -1;
+  static AqiLevel aqiLevelMean5s = AqiLevel::OutOfRange;
+  static AqiLevel aqiLevelMean60s = AqiLevel::OutOfRange;
 
-  uint32_t start = millis();
-  digitalWrite(13, LED_BUILTIN);  // turn the LED on (HIGH is the voltage level)
 
   PM25_AQI_Data data;
 
   uint8_t count = 20;
   while (count > 0 && !gAqiSensor.read(&data)) {
     count--;
-    delay(500);  // try again in a bit!
+    delay(100);  // try again in a bit!
   }
+
   if (count > 0) {
+    bool updateAvailable = false;
     if (last_crc != data.checksum) {
-      gPm25Env[index++] = data.pm25_env;
-      if (index >= kSamplesLength) {
-        index = 0;
-        filled = true;
+      gPm25CachedSamples[index60++] = data.pm25_env;
+      if (index60 >= kNumberOfCachedSamples) {
+        index60 = 0;
+        Serial.println("cache is too small: this should not have happened!");
       }
       last_crc = data.checksum;
 
+      uint32_t now = millis();
       uint16_t mae = 0;
       float nmae = 0.0f;
-      uint16_t pm25EnvMean = mean_error(kSamplesLength, gPm25Env, mae, nmae);
-      int16_t aqiValue(0);
-      AqiLevel aqiLevel;
-      pm25_to_aqi(static_cast<float>(pm25EnvMean), aqiValue, aqiLevel);
-
-      // Display
-      char buffer[32];
-      gDisplay.clearDisplay();
-      gDisplay.setTextSize(1);
-      gDisplay.setTextColor(SH110X_WHITE);
-      gDisplay.setCursor(0, 0);
-      sprintf(buffer, "pm: 1=%d 2.5=%d 10=%d", data.pm10_env, data.pm25_env, data.pm100_env);
-      gDisplay.println(buffer);
-      sprintf(buffer, "#: %d 2.5=%d %d",
-              data.particles_03um + data.particles_05um + data.particles_10um, data.particles_25um,
-              data.particles_50um + data.particles_100um);
-      gDisplay.println(buffer);
-      gDisplay.setTextSize(2);
-      size_t level;
-      if (aqiLevelMean == AqiLevel::OutOfRange) {
-        level = static_cast<int>(aqiLevel);
-      } else {
-        level = static_cast<int>(aqiLevelMean);
+      if (now - timer5 > 5 * 1000) {
+        uint16_t pm25EnvMean5s =
+            mean_error(index60 - index5, gPm25CachedSamples + index5, mae, nmae);
+        pm25_to_aqi(static_cast<float>(pm25EnvMean5s), aqiValueMean5s, aqiLevelMean5s);
+        index5 = index60;
+        timer5 = now;
+        updateAvailable = true;
+        if (now - timer60 > 60 * 1000) {
+          Serial.print("60s elapsed... index60=");
+          Serial.println(index60);
+          uint16_t pm25EnvMean60s = mean_error(index60, gPm25CachedSamples, mae, nmae);
+          pm25_to_aqi(static_cast<float>(pm25EnvMean60s), aqiValueMean60s, aqiLevelMean60s);
+          Serial.println("out of it...");
+          timer60 = now;
+          index60 = 0;
+          index5 = 0;
+          updateAvailable = true;
+        }
       }
-      sprintf(buffer, "AQI:%d|%d", aqiValue, aqiValueMean);
-      gDisplay.setCursor(0, 24);
-      gDisplay.println(buffer);
-      sprintf(buffer, "%s", AqiNames[level]);
-      gDisplay.setCursor(0, 46);
-      gDisplay.println(buffer);
-      gDisplay.display();
+
+      if (updateAvailable) {
+        // Display
+        char buffer[32];
+        gDisplay.clearDisplay();
+        gDisplay.setTextSize(1);
+        gDisplay.setTextColor(SH110X_WHITE);
+        gDisplay.setCursor(0, 0);
+        sprintf(buffer, "pm: 1=%d 2.5=%d 10=%d", data.pm10_env, data.pm25_env, data.pm100_env);
+        gDisplay.println(buffer);
+        sprintf(buffer, "#: %d 2.5=%d %d",
+                data.particles_03um + data.particles_05um + data.particles_10um,
+                data.particles_25um, data.particles_50um + data.particles_100um);
+        gDisplay.println(buffer);
+        gDisplay.setTextSize(2);
+        sprintf(buffer, "AQI:%d|%d", aqiValueMean5s, aqiValueMean60s);
+        gDisplay.setCursor(0, 24);
+        gDisplay.println(buffer);
+        sprintf(buffer, "%s", AqiNames[static_cast<int>(aqiLevelMean5s)]);
+        gDisplay.setCursor(0, 46);
+        gDisplay.println(buffer);
+        gDisplay.display();
+
+        gNeoStar.setPixelColor(0, gAqiColors[static_cast<int>(aqiLevelMean60s)]);
+        gNeoStar.show();
+
+        Serial.print("PM 2.5 (Env) 5s Mean = ");
+        Serial.print(pm25EnvMean5s);
+        Serial.print(" ==> AQI(5s) = ");
+        Serial.print(aqiValueMean5s);
+        Serial.print(" | PM 2.5 (Env) 60s Mean = ");
+        Serial.print(pm25EnvMean60s);
+        Serial.print(" ==> AQI(60s) = ");
+        Serial.print(aqiValueMean60s);
+        Serial.print(" % MAE = ");
+        Serial.println(mae);
+      }
     }
   }
 
-  delay(50);  // Just to let the LED blink long enough...
-
-  uint32_t now = millis();
-  if (filled) {
-    if (now - last_ms > 6000) {
-      uint16_t mae = 0;
-      float nmae = 0.0f;
-      pm25EnvMean = mean_error(kSamplesLength, gPm25Env, mae, nmae);
-      pm25_to_aqi(static_cast<float>(pm25EnvMean), aqiValueMean, aqiLevelMean);
-      Serial.print("PM 2.5 (Env): mean = ");
-      Serial.print(pm25EnvMean);
-      Serial.print(" / MAE = ");
-      Serial.print(mae);
-      Serial.print(" ==> aqi = ");
-      Serial.println(aqiValueMean);
-      gNeoStar.setPixelColor(0, gAqiColors[static_cast<int>(aqiLevelMean)]);
-      gNeoStar.show();
-      last_ms = now;
-    }
-  } else {
-    Serial.print("averaging for ");
-    Serial.print(kSamplesLength + 1 - index);
-    Serial.println("s...");
-  }
-
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(100);
   digitalWrite(LED_BUILTIN, LOW);
 
-  uint32_t elapsed = millis() - start;
-  if (elapsed > 999) {
-    Serial.println("Could not read data in 1s!");
-  } else {
-    delay(1000 - elapsed);
-  }
 }
